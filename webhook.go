@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -11,13 +12,14 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"text/template"
 	"time"
 
 	"github.com/adnanh/webhook/hook"
 
 	"github.com/codegangsta/negroni"
 	"github.com/gorilla/mux"
-	"github.com/satori/go.uuid"
+	uuid "github.com/satori/go.uuid"
 
 	fsnotify "gopkg.in/fsnotify.v1"
 )
@@ -281,24 +283,33 @@ func hookHandler(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set(responseHeader.Name, responseHeader.Value)
 			}
 
-			if matchedHook.CaptureCommandOutput {
-				response, err := handleHook(matchedHook, rid, &headers, &query, &payload, &body)
+			if matchedHook.ExecuteCommand != "" {
+				if matchedHook.CaptureCommandOutput {
+					response, err := handleCommandHook(matchedHook, rid, &headers, &query, &payload, &body)
 
-				if err != nil {
-					w.WriteHeader(http.StatusInternalServerError)
-					if matchedHook.CaptureCommandOutputOnError {
-						fmt.Fprintf(w, response)
+					if err != nil {
+						w.WriteHeader(http.StatusInternalServerError)
+						if matchedHook.CaptureCommandOutputOnError {
+							fmt.Fprintf(w, response)
+						} else {
+							w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+							fmt.Fprintf(w, "Error occurred while executing the hook's command. Please check your logs for more details.")
+						}
 					} else {
-						w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-						fmt.Fprintf(w, "Error occurred while executing the hook's command. Please check your logs for more details.")
+						fmt.Fprintf(w, response)
 					}
 				} else {
-					fmt.Fprintf(w, response)
+					go handleCommandHook(matchedHook, rid, &headers, &query, &payload, &body)
+					fmt.Fprintf(w, matchedHook.ResponseMessage)
 				}
 			} else {
-				go handleHook(matchedHook, rid, &headers, &query, &payload, &body)
 				fmt.Fprintf(w, matchedHook.ResponseMessage)
 			}
+
+			if len(matchedHook.ProxyWebhooks) > 0 {
+				handleProxyHook(matchedHook, rid, &headers, &query, &payload, &body)
+			}
+
 			return
 		}
 
@@ -323,7 +334,90 @@ func hookHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func handleHook(h *hook.Hook, rid string, headers, query, payload *map[string]interface{}, body *[]byte) (string, error) {
+type handleHook func(h *hook.Hook, rid string, headers, query, payload *map[string]interface{}, body *[]byte) (string, error)
+
+func handleProxyHook(h *hook.Hook, rid string, headers, query, payload *map[string]interface{}, body *[]byte) (string, error) {
+	tr := &http.Transport{
+		MaxIdleConns:    10,
+		IdleConnTimeout: 30 * time.Second,
+	}
+	client := &http.Client{
+		Transport: tr,
+	}
+
+	if h.ProxyWebhookTimeoutSeconds > 0 {
+		client.Timeout = time.Duration(h.ProxyWebhookTimeoutSeconds) * time.Second
+	}
+
+	funcMap := template.FuncMap{
+		"getBody": func(key string) string {
+			v, ok := hook.ExtractParameterAsString(key, *payload)
+			if !ok {
+				return fmt.Sprintf("get failed %s", key)
+			}
+			return v
+		},
+		"getQuery": func(key string) string {
+			v, ok := hook.ExtractParameterAsString(key, *query)
+			if !ok {
+				return fmt.Sprintf("get failed %s", key)
+			}
+			return v
+		},
+		"getHeader": func(key string) string {
+			v, ok := hook.ExtractParameterAsString(key, *headers)
+			if !ok {
+				return fmt.Sprintf("get failed %s", key)
+			}
+			return v
+		},
+	}
+
+	respStrs := []string{}
+	for _, proxy := range h.ProxyWebhooks {
+		tmpl, err := template.
+			New("proxy_webhook").
+			Delims("<%", "%>").
+			Funcs(funcMap).
+			Parse(proxy.BodyTempl)
+		if err != nil {
+			return "", nil
+		}
+
+		var buf bytes.Buffer
+
+		err = tmpl.Execute(&buf, nil)
+		if err != nil {
+			return "", nil
+		}
+
+		reqBody := buf.Bytes()
+		log.Printf("[%s] sending data %s to '%s'\n", rid, string(reqBody), proxy.URL)
+		req, err := http.NewRequest("POST", proxy.URL, bytes.NewBuffer(reqBody))
+		for _, header := range proxy.Headers {
+			log.Printf("[%s] add header %s=%s", rid, header.Name, header.Value)
+			req.Header.Add(header.Name, header.Value)
+		}
+
+		resp, err := client.Do(req)
+		if err != nil {
+			return "", err
+		}
+
+		defer resp.Body.Close()
+		body, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			return "", err
+		}
+
+		log.Printf("[%s] got response %s\n", rid, body)
+		respStrs = append(respStrs, string(body))
+	}
+
+	return strings.Join(respStrs, "\n"), nil
+}
+
+func handleCommandHook(h *hook.Hook, rid string, headers, query, payload *map[string]interface{}, body *[]byte) (string, error) {
 	var errors []error
 
 	// check the command exists

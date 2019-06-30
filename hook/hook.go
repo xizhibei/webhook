@@ -411,9 +411,18 @@ func (h *HooksFiles) Set(value string) error {
 	return nil
 }
 
+// ProxyWebhook ...
+type ProxyWebhook struct {
+	URL       string   `json:"url,omitempty"`
+	BodyTempl string   `json:"body-templ,omitempty"`
+	Headers   []Header `json:"headers,omitempty"`
+}
+
 // Hook type is a structure containing details for a single hook
 type Hook struct {
 	ID                                  string          `json:"id,omitempty"`
+	ProxyWebhooks                       []ProxyWebhook  `json:"proxy-webhooks,omitempty"`
+	ProxyWebhookTimeoutSeconds          int             `json:"proxy-webhook-timeout-seconds,omitempty"`
 	ExecuteCommand                      string          `json:"execute-command,omitempty"`
 	CommandWorkingDirectory             string          `json:"command-working-directory,omitempty"`
 	ResponseMessage                     string          `json:"response-message,omitempty"`
@@ -426,7 +435,7 @@ type Hook struct {
 	JSONStringParameters                []Argument      `json:"parse-parameters-as-json,omitempty"`
 	TriggerRule                         *Rules          `json:"trigger-rule,omitempty"`
 	TriggerRuleMismatchHttpResponseCode int             `json:"trigger-rule-mismatch-http-response-code,omitempty"`
-	IncomingPayloadContentType          string          `json:"incoming-payload-content-type,omitempty"`	
+	IncomingPayloadContentType          string          `json:"incoming-payload-content-type,omitempty"`
 }
 
 // ParseJSONParameters decodes specified arguments to JSON objects and replaces the
