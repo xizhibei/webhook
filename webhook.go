@@ -15,12 +15,11 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/Masterminds/sprig"
 	"github.com/adnanh/webhook/hook"
-
 	"github.com/codegangsta/negroni"
 	"github.com/gorilla/mux"
 	uuid "github.com/satori/go.uuid"
-
 	fsnotify "gopkg.in/fsnotify.v1"
 )
 
@@ -379,16 +378,19 @@ func handleProxyHook(h *hook.Hook, rid string, headers, query, payload *map[stri
 			New("proxy_webhook").
 			Delims("<%", "%>").
 			Funcs(funcMap).
+			Funcs(sprig.TxtFuncMap()).
 			Parse(proxy.BodyTempl)
 		if err != nil {
-			return "", nil
+			log.Printf("[%s] template error: %v", rid, err)
+			continue
 		}
 
 		var buf bytes.Buffer
 
 		err = tmpl.Execute(&buf, nil)
 		if err != nil {
-			return "", nil
+			log.Printf("[%s] template error: %v", rid, err)
+			continue
 		}
 
 		reqBody := buf.Bytes()
@@ -401,12 +403,14 @@ func handleProxyHook(h *hook.Hook, rid string, headers, query, payload *map[stri
 
 		resp, err := client.Do(req)
 		if err != nil {
+			log.Printf("[%s] request error: %v", rid, err)
 			return "", err
 		}
 
 		defer resp.Body.Close()
 		body, err := ioutil.ReadAll(resp.Body)
 		if err != nil {
+			log.Printf("[%s] read resp body error: %v", rid, err)
 			return "", err
 		}
 
